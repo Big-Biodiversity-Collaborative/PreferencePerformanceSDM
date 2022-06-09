@@ -3,11 +3,172 @@
 # jcoliver@arizona.edu
 # 2022-06-08
 
-# Download data from GBIF for E. chalcedona
-# Download data from GBIF for two host plants
-# Do geographic filtering and maybe date filtering...
+require(spocc)   # Downloading from gbif; loaded by function...
+require(dplyr)   # Data wrangling
+require(ggplot2) # Checking data, exploratory
 
-# Download climate data from...Swallowtail project?
+source(file = "src/download_gbif.R")
+
+# Download data from GBIF for Euphydryas chalcedona
+# Download data from GBIF for two host plants
+# Diplacus aurantiacus, Scrophularia californica
+species <- c("Euphydryas chalcedona", "Diplacus aurantiacus", 
+             "Scrophularia californica")
+obs_list <- list()
+for (one_sp in species) {
+  # download_gbif(species_name = one_sp, gbif_name = one_sp,
+  #               verbose = TRUE, restrict_n_amer = TRUE)
+  nice_name <- tolower(x = gsub(pattern = " ",
+                                replacement = "_",
+                                x = one_sp))
+  # host or insect?
+  sp_type <- "host"
+  if (one_sp == "Euphydryas chalcedona") {
+    sp_type <- "insect"
+  }
+  data_file <- paste0("data/gbif/", nice_name, "-gbif-raw.csv")
+  obs_list[[nice_name]][["sp_type"]] <- sp_type
+  obs_list[[nice_name]][["obs"]] <- read.csv(file = data_file)
+}
+
+# Do geographic filtering and maybe date filtering...
+# Restrict by D. aurantiacus, which has smallest range?
+nice_names <- tolower(x = gsub(pattern = " ",
+                               replacement = "_",
+                               x = species))
+
+# Drop anything east of -80 lon
+for (nice_name in nice_names) {
+  obs_list[[nice_name]][["obs"]] <- obs_list[[nice_name]][["obs"]] %>%
+    filter(longitude < -80)
+}
+
+# Only retain records from 2000 to present
+for (nice_name in nice_names) {
+  total_obs <- nrow(obs_list[[nice_name]][["obs"]])
+  obs_list[[nice_name]][["obs"]] <- obs_list[[nice_name]][["obs"]] %>%
+    filter(year >= 2000)
+  filtered_obs <- nrow(obs_list[[nice_name]][["obs"]])
+  message(filtered_obs, " ", nice_name, " records after filtering (",
+          total_obs, " before filtering)")
+}
+
+# Download climate data from Swallowtail project if necessary
+if (!file.exists("data/climate/bio19.tif")) {
+  # "https://github.com/Big-Biodiversity-Collaborative/SwallowtailClimateChange/blob/main/data/wc2-1/bio1.tif"
+  base_url <- "https://github.com/Big-Biodiversity-Collaborative/SwallowtailClimateChange/blob/main/data/wc2-1/"
+  bio_vars <- paste0("bio", 1:19)
+  for (bio in bio_vars) {
+    url = paste0(base_url, bio, ".tif")
+    download.file(url = url,
+                  destfile = paste0("data/climate/", bio, ".tif"))
+  }
+} else {
+  message("Climate data already on disk")
+}
+
+# Get geographic extent of *ALL* observations
+# Create background points that will be used for SDM evaluation
+
+##############################
+# PASTED FROM GITHUB start
+##############################
+
+# Predictors won't be needed beyond the extent of the (pseudo)absence points
+model_predictors <- raster::crop(x = predictors, y = absence_extent)
+
+# Use the observed points to pull out relevant predictor values
+predictors_presence <- raster::extract(x = model_predictors, y = presence)
+predictors_absence <- raster::extract(x = model_predictors, y = absence)
+
+# Make a vector of appropriate length with 0/1 values for 
+# (pseudo)absence/presence
+pa_data <- c(rep(x = 1, times = nrow(presence)), 
+             rep(x = 0, times = nrow(absence)))
+
+# Create a vector of folds for easier splitting into testing/training
+num_folds <- 5 # for 20/80 split
+fold <- c(rep(x = 1:num_folds, length.out = nrow(presence)),
+          rep(x = 1:num_folds, length.out = nrow(absence)))
+
+# Combine our presence / absence and fold vectors with environmental data we 
+# extracted
+full_data <- data.frame(cbind(pa = pa_data,
+                              fold = fold,
+                              rbind(predictors_presence, predictors_absence)))
+
+# Create separate data frames for testing and training presence data
+presence_train <- full_data %>%
+  filter(pa == 1) %>%
+  filter(fold != 1)
+presence_test <- full_data %>%
+  filter(pa == 1) %>%
+  filter(fold == 1)
+# Create separate data frames for testing and training (pseudo)absence data
+absence_train <- full_data %>%
+  filter(pa == 0) %>%
+  filter(fold != 1)
+absence_test <- full_data %>%
+  filter(pa == 0) %>%
+  filter(fold == 1)
+
+# Add presence and pseudoabsence training data into single data frame
+sdmtrain <- rbind(presence_train, absence_train)
+sdmtest <- rbind(presence_test, absence_test)
+
+if(verbose) {
+  message("Running generalized linear model.")
+}  
+
+# Run an GLM model, specifying model with standard formula syntax
+# Exclude bio3 (a function of bio2 & bio7) and bio7 (a function of bio5 and 
+# bio6)
+glm_model <- stats::glm(pa ~ bio1 + bio2 + bio4 + bio5 + bio6 +
+                          bio8 + bio9 + bio10 + bio11 + bio12 +
+                          bio13 + bio14 + bio15 + bio16 + bio17 + bio18 +
+                          bio19,
+                        data = sdmtrain,
+                        family = binomial(link = "logit"))
+
+if(verbose) {
+  message("Model complete. Evaluating GLM model with testing data.")
+}
+
+# Evaluate model performance with testing data
+glm_eval <- dismo::evaluate(p = presence_test, 
+                            a = absence_test, 
+                            model = glm_model)
+
+# Calculate threshold so we can make a P/A map later
+pres_threshold <- dismo::threshold(x = glm_eval, 
+                                   stat = "spec_sens")
+
+##############################
+# PASTED FROM GITHUB end
+##############################
+
+
+
+
+
+# Run SDM GLM on two host plants
+
+all_coords <- data.frame(sp = "ec", 
+                         longitude = ec$longitude,
+                         latitude = ec$latitude)
+all_coords <- all_coords %>%
+  bind_rows(data.frame(sp = "sc", 
+                       longitude = sc$longitude,
+                       latitude = sc$latitude)) %>%
+  bind_rows(data.frame(sp = "da", 
+                       longitude = da$longitude,
+                       latitude = da$latitude))
+
+# Look at distribution of points
+ggplot(data = all_coords, 
+       mapping = aes(x = longitude, y = latitude, color = sp)) +
+  geom_point(alpha = 0.5)
+
 
 # Run SDM GLM on two host plants
 # Run SDM GLM on E. chalcedona ~ climate data only
