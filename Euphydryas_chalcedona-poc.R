@@ -6,8 +6,12 @@
 require(spocc)   # Downloading from gbif; loaded by function...
 require(dplyr)   # Data wrangling
 require(ggplot2) # Checking data, exploratory
+require(terra)   # Raster things
+require(dismo)   # Background point sampling
 
 source(file = "src/download_gbif.R")
+num_background <- 10000
+set.seed(20220613)
 
 # Download data from GBIF for Euphydryas chalcedona
 # Download data from GBIF for two host plants
@@ -43,6 +47,11 @@ for (nice_name in nice_names) {
     filter(longitude < -80)
 }
 
+# While iterating, can keep track of lat/lon bounds
+min_lon <- NA
+max_lon <- NA
+min_lat <- NA
+max_lat <- NA
 # Only retain records from 2000 to present
 for (nice_name in nice_names) {
   total_obs <- nrow(obs_list[[nice_name]][["obs"]])
@@ -51,24 +60,74 @@ for (nice_name in nice_names) {
   filtered_obs <- nrow(obs_list[[nice_name]][["obs"]])
   message(filtered_obs, " ", nice_name, " records after filtering (",
           total_obs, " before filtering)")
+  # Get min/max lat/lon while iterating here
+  # So ugly, JCO
+  if (is.na(min_lon)) {
+    min_lon <- min(obs_list[[nice_name]][["obs"]]$longitude)
+  } else {
+    min_lon <- min(min_lon, obs_list[[nice_name]][["obs"]]$longitude)
+  }
+  if (is.na(max_lon)) {
+    max_lon <- max(obs_list[[nice_name]][["obs"]]$longitude)
+  } else {
+    max_lon <- max(max_lon, obs_list[[nice_name]][["obs"]]$longitude)
+  }
+  if (is.na(min_lat)) {
+    min_lat <- min(obs_list[[nice_name]][["obs"]]$latitude)
+  } else {
+    min_lat <- min(min_lat, obs_list[[nice_name]][["obs"]]$latitude)
+  }
+  if (is.na(max_lat)) {
+    max_lat <- max(obs_list[[nice_name]][["obs"]]$latitude)
+  } else {
+    max_lat <- max(max_lat, obs_list[[nice_name]][["obs"]]$latitude)
+  }
 }
 
 # Download climate data from Swallowtail project if necessary
-if (!file.exists("data/climate/bio19.tif")) {
-  # "https://github.com/Big-Biodiversity-Collaborative/SwallowtailClimateChange/blob/main/data/wc2-1/bio1.tif"
-  base_url <- "https://github.com/Big-Biodiversity-Collaborative/SwallowtailClimateChange/blob/main/data/wc2-1/"
-  bio_vars <- paste0("bio", 1:19)
-  for (bio in bio_vars) {
+# "https://github.com/Big-Biodiversity-Collaborative/SwallowtailClimateChange/blob/main/data/wc2-1/bio1.tif"
+base_url <- "https://github.com/Big-Biodiversity-Collaborative/SwallowtailClimateChange/raw/main/data/wc2-1/"
+bio_vars <- paste0("bio", 1:19)
+for (bio in bio_vars) {
+  dest_file <- paste0("data/climate/", bio, ".tif")
+  if (!file.exists(dest_file)) {
     url = paste0(base_url, bio, ".tif")
     download.file(url = url,
-                  destfile = paste0("data/climate/", bio, ".tif"))
+                  destfile = dest_file)
+  } else {
+    message(paste0(bio, " climate data already on disk"))
   }
-} else {
-  message("Climate data already on disk")
 }
 
-# Get geographic extent of *ALL* observations
-# Create background points that will be used for SDM evaluation
+# Create geographic extent of *ALL* observations
+# bio1 <- terra::rast(x = "data/climate/bio1.tif")
+# geo_ext <- terra::ext(bio1)
+geo_ext <- terra::ext(c(min_lon, max_lon, min_lat, max_lat))
+
+# Create background points that will be used for SDM evaluation; use one of the 
+# climate files for resolution
+mask <- terra::rast(x = "data/climate/bio1.tif")
+
+# Use random sampling to generate pseudo-absence points
+# mask:  Provides resolution of sampling points
+# n:     Number of random points
+# ext:   Spatially restricts sampling
+# extf:  Expands sampling a little bit
+background_points <- dismo::randomPoints(mask = mask,  
+                                         n = num_background,
+                                         ext = geo_ext, 
+                                         extf = 1.25)
+# TODO: Still would be nice to extend background points a little beyond the 
+# geographic extent of observations
+# TODO: Doesn't properly mask random points; i.e. samples from ocean
+background_points <- terra::spatSample(x = mask,
+                                       size = num_background,
+                                       method = "random",
+                                       ext = geo_ext,
+                                       as.raster = TRUE,
+                                       na.rm = TRUE)
+plot(background_points)
+
 
 ##############################
 # PASTED FROM GITHUB start
