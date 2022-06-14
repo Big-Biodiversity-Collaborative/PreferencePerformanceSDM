@@ -113,20 +113,73 @@ mask <- terra::rast(x = "data/climate/bio1.tif")
 # n:     Number of random points
 # ext:   Spatially restricts sampling
 # extf:  Expands sampling a little bit
-background_points <- dismo::randomPoints(mask = mask,  
-                                         n = num_background,
-                                         ext = geo_ext, 
-                                         extf = 1.25)
-# TODO: Still would be nice to extend background points a little beyond the 
+# background_points <- dismo::randomPoints(mask = raster::raster(x = "data/climate/bio1.tif"),
+#                                          n = num_background,
+#                                          ext = raster::extent(x = c(min_lon, max_lon, min_lat, max_lat)), 
+#                                          extf = 1.25)
+
+# Extend background points a little beyond the 
 # geographic extent of observations
-# TODO: Doesn't properly mask random points; i.e. samples from ocean
-background_points <- terra::spatSample(x = mask,
-                                       size = num_background,
-                                       method = "random",
-                                       ext = geo_ext,
-                                       as.raster = TRUE,
-                                       na.rm = TRUE)
-plot(background_points)
+absence_points <- terra::spatSample(x = mask,
+                                    size = num_background,
+                                    method = "random",
+                                    ext = geo_ext * 1.25,
+                                    as.points = TRUE,
+                                    na.rm = TRUE)
+# plot(absence_points)
+absence_extent <- terra::ext(absence_points)
+
+# Read in climate data into single stack
+bio_files <- paste0("data/climate/", bio_vars, ".tif")
+predictors <- terra::rast(x = bio_files)
+
+# Predictors won't be needed beyond the extent of the (pseudo)absence points
+model_predictors <- terra::crop(x = predictors, y = absence_extent)
+
+# We can use same absence object for both hosts
+predictors_absence <- raster::extract(x = model_predictors, y = absence_points)
+
+# Will want to create one model for each of the host plants
+host_models <- list()
+for (host_nice_name in nice_names[-1]) {
+  presence <- obs_list[[host_nice_name]][["obs"]][, c("longitude", "latitude")]
+  predictors_presence <- terra::extract(x = model_predictors, y = presence)
+  
+}
+
+# Make two presence things, one for each host plant
+da_presence <- obs_list[[nice_names[2]]][["obs"]][, c("longitude", "latitude")]
+predictors_da_presence <- terra::extract(x = model_predictors, y = da_presence)
+
+sc_presence <- obs_list[[nice_names[3]]][["obs"]][, c("longitude", "latitude")]
+predictors_sc_presence <- terra::extract(x = model_predictors, y = sc_presence)
+
+# We can use same absence object for both hosts
+predictors_absence <- raster::extract(x = model_predictors, y = absence_points)
+
+# Make a vector of appropriate length with 0/1 values for 
+# (pseudo)absence/presence
+da_pa_data <- c(rep(x = 1, times = nrow(da_presence)), 
+                rep(x = 0, times = nrow(absence_points)))
+sc_pa_data <- c(rep(x = 1, times = nrow(sc_presence)), 
+                rep(x = 0, times = nrow(absence_points)))
+
+# Create a vector of folds for easier splitting into testing/training
+num_folds <- 5 # for 20/80 split
+da_fold <- c(rep(x = 1:num_folds, length.out = nrow(da_presence)),
+             rep(x = 1:num_folds, length.out = nrow(absence_points)))
+sc_fold <- c(rep(x = 1:num_folds, length.out = nrow(sc_presence)),
+             rep(x = 1:num_folds, length.out = nrow(absence_points)))
+
+# Combine our presence / absence and fold vectors with environmental data we 
+# extracted
+full_da_data <- data.frame(cbind(pa = da_pa_data,
+                              fold = da_fold,
+                              rbind(predictors_da_presence, predictors_absence)))
+
+full_sc_data <- data.frame(cbind(pa = sc_pa_data,
+                                 fold = sc_fold,
+                                 rbind(predictors_sc_presence, predictors_absence)))
 
 
 ##############################
