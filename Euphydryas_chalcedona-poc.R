@@ -7,11 +7,14 @@ require(spocc)   # Downloading from gbif; loaded by function...
 require(dplyr)   # Data wrangling
 require(ggplot2) # Checking data, exploratory
 require(terra)   # Raster things
-require(dismo)   # Background point sampling
 
 source(file = "src/download_gbif.R")
 num_background <- 10000
 set.seed(20220613)
+
+# TODO: Need some (manual?) QC for observation points. There are three 
+# questionable observations of D. aurantiacus (northern WA, UT or CO, and one 
+# off the coast of Baja California)
 
 # Download data from GBIF for Euphydryas chalcedona
 # Download data from GBIF for two host plants
@@ -90,6 +93,9 @@ base_url <- "https://github.com/Big-Biodiversity-Collaborative/SwallowtailClimat
 bio_vars <- paste0("bio", 1:19)
 for (bio in bio_vars) {
   dest_file <- paste0("data/climate/", bio, ".tif")
+  if (!dir.exists("data/climate")) {
+    dir.create("data/climate")
+  }
   if (!file.exists(dest_file)) {
     url = paste0(base_url, bio, ".tif")
     download.file(url = url,
@@ -137,157 +143,93 @@ predictors <- terra::rast(x = bio_files)
 model_predictors <- terra::crop(x = predictors, y = absence_extent)
 
 # We can use same absence object for both hosts
-predictors_absence <- raster::extract(x = model_predictors, y = absence_points)
+predictors_absence <- terra::extract(x = model_predictors, y = absence_points)
 
 # Will want to create one model for each of the host plants
 host_models <- list()
 for (host_nice_name in nice_names[-1]) {
-  presence <- obs_list[[host_nice_name]][["obs"]][, c("longitude", "latitude")]
-  predictors_presence <- terra::extract(x = model_predictors, y = presence)
+  presence_points <- obs_list[[host_nice_name]][["obs"]][, c("longitude", "latitude")]
+  predictors_presence <- terra::extract(x = model_predictors, y = presence_points)
+
+  # TODO: Anything with absence should be taken out of this for loop
   
+  # Make a vector of appropriate length with 0/1 values for 
+  # (pseudo)absence/presence
+  pa_data <- c(rep(x = 1, times = nrow(presence_points)), 
+               rep(x = 0, times = nrow(absence_points)))
+
+  # Create a vector of folds for easier splitting into testing/training
+  num_folds <- 5 # for 20/80 split
+  fold <- c(rep(x = 1:num_folds, length.out = nrow(presence_points)),
+            rep(x = 1:num_folds, length.out = nrow(absence_points)))
+
+  # Combine our presence / absence and fold vectors with environmental data we 
+  # extracted
+  full_data <- data.frame(cbind(pa = pa_data,
+                                fold = fold,
+                                rbind(predictors_presence, predictors_absence)))
+
+  # Before doing test/train split, drop any presence rows with missing (NA) 
+  # climate data (will also drop any absence points missing climate data, 
+  # although there should not be any of those)
+  full_data <- na.omit(full_data)
+  
+  # Create separate data frames for testing and training presence data
+  presence_train <- full_data %>%
+    filter(pa == 1) %>%
+    filter(fold != 1)
+  presence_test <- full_data %>%
+    filter(pa == 1) %>%
+    filter(fold == 1)
+  # Create separate data frames for testing and training (pseudo)absence data
+  absence_train <- full_data %>%
+    filter(pa == 0) %>%
+    filter(fold != 1)
+  absence_test <- full_data %>%
+    filter(pa == 0) %>%
+    filter(fold == 1)
+
+  # Add presence and pseudoabsence training data into single data frame
+  sdmtrain <- rbind(presence_train, absence_train)
+  sdmtest <- rbind(presence_test, absence_test)
+
+  message(paste0("Running generalized linear model: ", host_nice_name))
+
+  # Run an GLM model, specifying model with standard formula syntax
+  # Exclude bio3 (a function of bio2 & bio7) and bio7 (a function of bio5 and 
+  # bio6)
+  # May throw a warning, but not sure if this is so bad  
+  glm_model <- stats::glm(pa ~ bio1 + bio2 + bio4 + bio5 + bio6 +
+                            bio8 + bio9 + bio10 + bio11 + bio12 +
+                            bio13 + bio14 + bio15 + bio16 + bio17 + bio18 +
+                            bio19,
+                          data = sdmtrain,
+                          family = binomial(link = "logit"))
+  
+  message(paste0("Model complete. Evaluating GLM model with testing data: ",
+                 host_nice_name))
+
+  # We want now to use that model to create a raster of presence probabilities
+  presence_probs <- predict(model_predictors,
+                            glm_model,
+                            type = "response")
+  
+  host_models[[host_nice_name]] <- presence_probs
 }
 
-# Make two presence things, one for each host plant
-da_presence <- obs_list[[nice_names[2]]][["obs"]][, c("longitude", "latitude")]
-predictors_da_presence <- terra::extract(x = model_predictors, y = da_presence)
+# Now want to take those predicted presence probabilities and do an SDM model
+# for the insect, where the only predictors are those host probabilities
 
-sc_presence <- obs_list[[nice_names[3]]][["obs"]][, c("longitude", "latitude")]
-predictors_sc_presence <- terra::extract(x = model_predictors, y = sc_presence)
-
-# We can use same absence object for both hosts
-predictors_absence <- raster::extract(x = model_predictors, y = absence_points)
-
-# Make a vector of appropriate length with 0/1 values for 
-# (pseudo)absence/presence
-da_pa_data <- c(rep(x = 1, times = nrow(da_presence)), 
-                rep(x = 0, times = nrow(absence_points)))
-sc_pa_data <- c(rep(x = 1, times = nrow(sc_presence)), 
-                rep(x = 0, times = nrow(absence_points)))
-
-# Create a vector of folds for easier splitting into testing/training
-num_folds <- 5 # for 20/80 split
-da_fold <- c(rep(x = 1:num_folds, length.out = nrow(da_presence)),
-             rep(x = 1:num_folds, length.out = nrow(absence_points)))
-sc_fold <- c(rep(x = 1:num_folds, length.out = nrow(sc_presence)),
-             rep(x = 1:num_folds, length.out = nrow(absence_points)))
-
-# Combine our presence / absence and fold vectors with environmental data we 
-# extracted
-full_da_data <- data.frame(cbind(pa = da_pa_data,
-                              fold = da_fold,
-                              rbind(predictors_da_presence, predictors_absence)))
-
-full_sc_data <- data.frame(cbind(pa = sc_pa_data,
-                                 fold = sc_fold,
-                                 rbind(predictors_sc_presence, predictors_absence)))
-
-
-##############################
-# PASTED FROM GITHUB start
-##############################
-
-# Predictors won't be needed beyond the extent of the (pseudo)absence points
-model_predictors <- raster::crop(x = predictors, y = absence_extent)
-
-# Use the observed points to pull out relevant predictor values
-predictors_presence <- raster::extract(x = model_predictors, y = presence)
-predictors_absence <- raster::extract(x = model_predictors, y = absence)
-
-# Make a vector of appropriate length with 0/1 values for 
-# (pseudo)absence/presence
-pa_data <- c(rep(x = 1, times = nrow(presence)), 
-             rep(x = 0, times = nrow(absence)))
-
-# Create a vector of folds for easier splitting into testing/training
-num_folds <- 5 # for 20/80 split
-fold <- c(rep(x = 1:num_folds, length.out = nrow(presence)),
-          rep(x = 1:num_folds, length.out = nrow(absence)))
-
-# Combine our presence / absence and fold vectors with environmental data we 
-# extracted
-full_data <- data.frame(cbind(pa = pa_data,
-                              fold = fold,
-                              rbind(predictors_presence, predictors_absence)))
-
-# Create separate data frames for testing and training presence data
-presence_train <- full_data %>%
-  filter(pa == 1) %>%
-  filter(fold != 1)
-presence_test <- full_data %>%
-  filter(pa == 1) %>%
-  filter(fold == 1)
-# Create separate data frames for testing and training (pseudo)absence data
-absence_train <- full_data %>%
-  filter(pa == 0) %>%
-  filter(fold != 1)
-absence_test <- full_data %>%
-  filter(pa == 0) %>%
-  filter(fold == 1)
-
-# Add presence and pseudoabsence training data into single data frame
-sdmtrain <- rbind(presence_train, absence_train)
-sdmtest <- rbind(presence_test, absence_test)
-
-if(verbose) {
-  message("Running generalized linear model.")
-}  
-
-# Run an GLM model, specifying model with standard formula syntax
-# Exclude bio3 (a function of bio2 & bio7) and bio7 (a function of bio5 and 
-# bio6)
-glm_model <- stats::glm(pa ~ bio1 + bio2 + bio4 + bio5 + bio6 +
-                          bio8 + bio9 + bio10 + bio11 + bio12 +
-                          bio13 + bio14 + bio15 + bio16 + bio17 + bio18 +
-                          bio19,
-                        data = sdmtrain,
-                        family = binomial(link = "logit"))
-
-if(verbose) {
-  message("Model complete. Evaluating GLM model with testing data.")
-}
-
-# Evaluate model performance with testing data
-glm_eval <- dismo::evaluate(p = presence_test, 
-                            a = absence_test, 
-                            model = glm_model)
-
-# Calculate threshold so we can make a P/A map later
-pres_threshold <- dismo::threshold(x = glm_eval, 
-                                   stat = "spec_sens")
-
-##############################
-# PASTED FROM GITHUB end
-##############################
-
-
-
-
-
-# Run SDM GLM on two host plants
-
-all_coords <- data.frame(sp = "ec", 
-                         longitude = ec$longitude,
-                         latitude = ec$latitude)
-all_coords <- all_coords %>%
-  bind_rows(data.frame(sp = "sc", 
-                       longitude = sc$longitude,
-                       latitude = sc$latitude)) %>%
-  bind_rows(data.frame(sp = "da", 
-                       longitude = da$longitude,
-                       latitude = da$latitude))
-
-# Look at distribution of points
-ggplot(data = all_coords, 
-       mapping = aes(x = longitude, y = latitude, color = sp)) +
-  geom_point(alpha = 0.5)
-
+########################################
+# OLD BELOW
 
 # Run SDM GLM on two host plants
 # Run SDM GLM on E. chalcedona ~ climate data only
 # Maybe do some lassoing here?
 # Run SDM GLM on E. chalcedona ~ climate + hosts
-
 # See if model with hosts is better? Why?
+# Run SDM GLM on E. chalcedona ~ hosts
+
 # Compare model loadings for two hosts
 # try Wald test
 # https://stats.stackexchange.com/questions/478408/compare-regression-coefficients-within-the-same-model
@@ -298,5 +240,3 @@ ggplot(data = all_coords,
 # https://stats.stackexchange.com/questions/211584/testing-linear-restriction-in-r/211597#211597
 # or car::linear.hypothesis()
 # https://stats.stackexchange.com/questions/228351/how-to-compare-coefficients-within-the-same-multiple-regression-model
-
-# Run SDM GLM on E. chalcedona ~ hosts?
