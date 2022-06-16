@@ -12,9 +12,9 @@ source(file = "src/download_gbif.R")
 num_background <- 10000
 set.seed(20220613)
 
-# TODO: Need some (manual?) QC for observation points. There are three 
-# questionable observations of D. aurantiacus (northern WA, UT or CO, and one 
-# off the coast of Baja California)
+# TODO: currently using an 80/20 train/test split, but if we are not doing 
+# model evaluation to find 0/1 threshold cutoffs, we could probably do away 
+# with this split
 
 # Download data from GBIF for Euphydryas chalcedona
 # Download data from GBIF for two host plants
@@ -42,16 +42,25 @@ for (one_sp in species) {
   obs_list[[nice_name]][["obs"]] <- read.csv(file = data_file)
 }
 
-# Do geographic filtering and maybe date filtering...
-# Restrict by D. aurantiacus, which has smallest range?
+# For QA/QC plotting
+all_obs <- dplyr::bind_rows(lapply(obs_list, "[[", "obs"))
+ggplot(data = all_obs, mapping = aes(x = longitude, 
+                                     y = latitude,
+                                     color = accepted_name)) +
+  geom_point(alpha = 0.7, size = 0.4) +
+  theme_bw() +
+  theme(legend.position = "top")
+  
 nice_names <- tolower(x = gsub(pattern = " ",
                                replacement = "_",
                                x = species))
 
-# Drop anything east of -80 lon
+# Drop anything east of -101 lon, south of 30, and north of 55
 for (nice_name in nice_names) {
   obs_list[[nice_name]][["obs"]] <- obs_list[[nice_name]][["obs"]] %>%
-    filter(longitude < -80)
+    filter(longitude < -101) %>%
+    filter(latitude > 30) %>%
+    filter(latitude < 55)
 }
 
 # While iterating, can keep track of lat/lon bounds
@@ -90,6 +99,17 @@ for (nice_name in nice_names) {
     max_lat <- max(max_lat, obs_list[[nice_name]][["obs"]]$latitude)
   }
 }
+
+# Another QA/QC plot, post-filtering
+all_obs <- dplyr::bind_rows(lapply(obs_list, "[[", "obs"))
+ggplot(data = all_obs, mapping = aes(x = longitude, 
+                                     y = latitude,
+                                     color = accepted_name)) +
+  geom_point(alpha = 0.7, size = 0.4, pch = 20) +
+  theme_bw() +
+  theme(legend.position = "top")
+
+
 
 # Download climate data from Swallowtail project if necessary
 # "https://github.com/Big-Biodiversity-Collaborative/SwallowtailClimateChange/blob/main/data/wc2-1/bio1.tif"
@@ -290,6 +310,9 @@ lnL_full <- as.numeric(stats::logLik(glm_model))
 delta_lnL <- lnL_full - lnL_simple
 # Calculate p-value assuming chi-square distribution and 1 df
 p_value <- pchisq(q = delta_lnL, df = 1, lower.tail = FALSE)
+
+# Now try an SDM for E. chalcedona that includes the climate predictors, too
+
 
 ########################################
 # OLD BELOW
