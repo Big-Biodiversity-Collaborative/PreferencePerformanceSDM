@@ -47,7 +47,7 @@ all_obs <- dplyr::bind_rows(lapply(obs_list, "[[", "obs"))
 ggplot(data = all_obs, mapping = aes(x = longitude, 
                                      y = latitude,
                                      color = accepted_name)) +
-  geom_point(alpha = 0.7, size = 0.4) +
+  geom_point(alpha = 0.7, size = 0.6, pch = 21) +
   theme_bw() +
   theme(legend.position = "top")
   
@@ -105,7 +105,7 @@ all_obs <- dplyr::bind_rows(lapply(obs_list, "[[", "obs"))
 ggplot(data = all_obs, mapping = aes(x = longitude, 
                                      y = latitude,
                                      color = accepted_name)) +
-  geom_point(alpha = 0.7, size = 0.4, pch = 20) +
+  geom_point(alpha = 0.7, size = 0.6, pch = 21) +
   theme_bw() +
   theme(legend.position = "top")
 
@@ -235,14 +235,16 @@ for (host_nice_name in nice_names[-1]) {
 # Now want to take those predicted presence probabilities and do an SDM model
 # for the insect, where the only predictors are those host probabilities
 
-# Start by creating a raster stack of the host predicted probabilities
+# Start by creating a raster stack that includes bioclimate data and the 
+# predicted probabilities for each host
 host_predictors <- terra::rast(host_models)
+all_predictors <- c(model_predictors, host_predictors)
 
 presence_points <- obs_list[[1]][["obs"]][, c("longitude", "latitude")]
-predictors_presence <- terra::extract(x = host_predictors, y = presence_points)
+predictors_presence <- terra::extract(x = all_predictors, y = presence_points)
 
 # Need to grab predicted probabilities for our absence points, too
-predictors_absence <- terra::extract(x = host_predictors, y = absence_points)
+predictors_absence <- terra::extract(x = all_predictors, y = absence_points)
 
 # Make a vector of appropriate length with 0/1 values for 
 # (pseudo)absence/presence
@@ -287,7 +289,7 @@ sdmtest <- rbind(presence_test, absence_test)
 message(paste0("Running generalized linear model: ", names(obs_list)[1]))
 
 # Run an GLM model, specifying model with standard formula syntax
-# Including host predicted probabilities as the predictors
+# Only including host predicted probabilities as the predictors
 pred_string <- paste(names(host_models), collapse = " + ")
 formula_string <- paste0("pa ~ ", pred_string)
 
@@ -312,6 +314,19 @@ delta_lnL <- lnL_full - lnL_simple
 p_value <- pchisq(q = delta_lnL, df = 1, lower.tail = FALSE)
 
 # Now try an SDM for E. chalcedona that includes the climate predictors, too
+# Want all climate variables except bio3 and bio3
+model_bios <- c(1:2, 4:6, 8:19)
+model_bios <- paste0("bio", model_bios)
+
+pred_string <- paste(c(model_bios, names(host_models)), 
+                     collapse = " + ")
+formula_string <- paste0("pa ~ ", pred_string)
+
+message("Running full model with bioclim data and hosts as predictors")
+glm_full_model <- stats::glm(formula = eval(expr = formula_string),
+                             data = sdmtrain,
+                             family = binomial(link = "logit"))
+summary(glm_full_model)
 
 
 ########################################
