@@ -23,17 +23,21 @@ species <- c("Euphydryas chalcedona", "Diplacus aurantiacus",
              "Scrophularia californica")
 obs_list <- list()
 for (one_sp in species) {
-  # download_gbif(species_name = one_sp, gbif_name = one_sp,
-  #               verbose = TRUE, restrict_n_amer = TRUE)
   nice_name <- tolower(x = gsub(pattern = " ",
                                 replacement = "_",
                                 x = one_sp))
+  data_file <- paste0("data/gbif/", nice_name, "-gbif-raw.csv")
+  if (!file.exists(data_file)) {
+  download_gbif(species_name = one_sp, gbif_name = one_sp,
+                verbose = TRUE, restrict_n_amer = TRUE)
+  } else {
+    message(paste0("Data for ", one_sp, " already on disk."))
+  }
   # host or insect?
   sp_type <- "host"
   if (one_sp == "Euphydryas chalcedona") {
     sp_type <- "insect"
   }
-  data_file <- paste0("data/gbif/", nice_name, "-gbif-raw.csv")
   obs_list[[nice_name]][["sp_type"]] <- sp_type
   obs_list[[nice_name]][["obs"]] <- read.csv(file = data_file)
 }
@@ -115,15 +119,6 @@ geo_ext <- terra::ext(c(min_lon, max_lon, min_lat, max_lat))
 mask <- terra::rast(x = "data/climate/bio1.tif")
 
 # Use random sampling to generate pseudo-absence points
-# mask:  Provides resolution of sampling points
-# n:     Number of random points
-# ext:   Spatially restricts sampling
-# extf:  Expands sampling a little bit
-# background_points <- dismo::randomPoints(mask = raster::raster(x = "data/climate/bio1.tif"),
-#                                          n = num_background,
-#                                          ext = raster::extent(x = c(min_lon, max_lon, min_lat, max_lat)), 
-#                                          extf = 1.25)
-
 # Extend background points a little beyond the 
 # geographic extent of observations
 absence_points <- terra::spatSample(x = mask,
@@ -206,7 +201,7 @@ for (host_nice_name in nice_names[-1]) {
                           data = sdmtrain,
                           family = binomial(link = "logit"))
   
-  message(paste0("Model complete. Evaluating GLM model with testing data: ",
+  message(paste0("Model complete. Calculating predicted presence probabilities: ",
                  host_nice_name))
 
   # We want now to use that model to create a raster of presence probabilities
@@ -219,6 +214,82 @@ for (host_nice_name in nice_names[-1]) {
 
 # Now want to take those predicted presence probabilities and do an SDM model
 # for the insect, where the only predictors are those host probabilities
+
+# Start by creating a raster stack of the host predicted probabilities
+host_predictors <- terra::rast(host_models)
+
+presence_points <- obs_list[[1]][["obs"]][, c("longitude", "latitude")]
+predictors_presence <- terra::extract(x = host_predictors, y = presence_points)
+
+# Need to grab predicted probabilities for our absence points, too
+predictors_absence <- terra::extract(x = host_predictors, y = absence_points)
+
+# Make a vector of appropriate length with 0/1 values for 
+# (pseudo)absence/presence
+pa_data <- c(rep(x = 1, times = nrow(presence_points)), 
+             rep(x = 0, times = nrow(absence_points)))
+
+# Create a vector of folds for easier splitting into testing/training
+num_folds <- 5 # for 20/80 split
+fold <- c(rep(x = 1:num_folds, length.out = nrow(presence_points)),
+          rep(x = 1:num_folds, length.out = nrow(absence_points)))
+
+# Combine our presence / absence and fold vectors with environmental data we 
+# extracted
+full_data <- data.frame(cbind(pa = pa_data,
+                              fold = fold,
+                              rbind(predictors_presence, predictors_absence)))
+
+# Before doing test/train split, drop any presence rows with missing (NA) 
+# climate data (will also drop any absence points missing climate data, 
+# although there should not be any of those)
+full_data <- na.omit(full_data)
+
+# Create separate data frames for testing and training presence data
+presence_train <- full_data %>%
+  filter(pa == 1) %>%
+  filter(fold != 1)
+presence_test <- full_data %>%
+  filter(pa == 1) %>%
+  filter(fold == 1)
+# Create separate data frames for testing and training (pseudo)absence data
+absence_train <- full_data %>%
+  filter(pa == 0) %>%
+  filter(fold != 1)
+absence_test <- full_data %>%
+  filter(pa == 0) %>%
+  filter(fold == 1)
+
+# Add presence and pseudoabsence training data into single data frame
+sdmtrain <- rbind(presence_train, absence_train)
+sdmtest <- rbind(presence_test, absence_test)
+
+message(paste0("Running generalized linear model: ", names(obs_list)[1]))
+
+# Run an GLM model, specifying model with standard formula syntax
+# Including host predicted probabilities as the predictors
+pred_string <- paste(names(host_models), collapse = " + ")
+formula_string <- paste0("pa ~ ", pred_string)
+
+glm_model <- stats::glm(formula = eval(expr = formula_string),
+                        data = sdmtrain,
+                        family = binomial(link = "logit"))
+summary(glm_model)
+
+# A quick and dirty LRT
+# Make a new column that is the sum of the probabilities for all the hosts
+sdmtrain$host_sum <- rowSums(sdmtrain[, names(obs_list)[-1]])
+
+# Run the glm with only that host_sum as predictor
+glm_simple_model <- stats::glm(formula = pa ~ host_sum,
+                               data = sdmtrain,
+                               family = binomial(link = "logit"))
+
+lnL_simple <- as.numeric(stats::logLik(glm_simple_model))
+lnL_full <- as.numeric(stats::logLik(glm_model))
+delta_lnL <- lnL_full - lnL_simple
+# Calculate p-value assuming chi-square distribution and 1 df
+p_value <- pchisq(q = delta_lnL, df = 1, lower.tail = FALSE)
 
 ########################################
 # OLD BELOW
