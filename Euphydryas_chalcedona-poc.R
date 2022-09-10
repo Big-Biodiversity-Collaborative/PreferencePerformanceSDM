@@ -3,113 +3,20 @@
 # jcoliver@arizona.edu
 # 2022-06-08
 
-require(spocc)   # Downloading from gbif; loaded by function...
 require(dplyr)   # Data wrangling
 require(ggplot2) # Checking data, exploratory
 require(terra)   # Raster things
 
 source(file = "src/download_gbif.R")
+source(file = "src/envelope.R")
 num_background <- 10000
 set.seed(20220613)
+# Indicates whether to download data if they already exist on disk
+re_download <- FALSE
 
 # TODO: currently using an 80/20 train/test split, but if we are not doing 
 # model evaluation to find 0/1 threshold cutoffs, we could probably do away 
 # with this split
-
-# Download data from GBIF for Euphydryas chalcedona
-# Download data from GBIF for two host plants
-# Diplacus aurantiacus, Scrophularia californica
-species <- c("Euphydryas chalcedona", "Diplacus aurantiacus", 
-             "Scrophularia californica")
-obs_list <- list()
-for (one_sp in species) {
-  nice_name <- tolower(x = gsub(pattern = " ",
-                                replacement = "_",
-                                x = one_sp))
-  data_file <- paste0("data/gbif/", nice_name, "-gbif-raw.csv")
-  if (!file.exists(data_file)) {
-  download_gbif(species_name = one_sp, gbif_name = one_sp,
-                verbose = TRUE, restrict_n_amer = TRUE)
-  } else {
-    message(paste0("Data for ", one_sp, " already on disk."))
-  }
-  # host or insect?
-  sp_type <- "host"
-  if (one_sp == "Euphydryas chalcedona") {
-    sp_type <- "insect"
-  }
-  obs_list[[nice_name]][["sp_type"]] <- sp_type
-  obs_list[[nice_name]][["obs"]] <- read.csv(file = data_file)
-}
-
-# For QA/QC plotting
-all_obs <- dplyr::bind_rows(lapply(obs_list, "[[", "obs"))
-ggplot(data = all_obs, mapping = aes(x = longitude, 
-                                     y = latitude,
-                                     color = accepted_name)) +
-  geom_point(alpha = 0.7, size = 0.6, pch = 21) +
-  theme_bw() +
-  theme(legend.position = "top")
-  
-nice_names <- tolower(x = gsub(pattern = " ",
-                               replacement = "_",
-                               x = species))
-
-# Drop anything east of -101 lon, south of 30, and north of 55
-for (nice_name in nice_names) {
-  obs_list[[nice_name]][["obs"]] <- obs_list[[nice_name]][["obs"]] %>%
-    filter(longitude < -101) %>%
-    filter(latitude > 30) %>%
-    filter(latitude < 55)
-}
-
-# While iterating, can keep track of lat/lon bounds
-min_lon <- NA
-max_lon <- NA
-min_lat <- NA
-max_lat <- NA
-# Only retain records from 2000 to present
-for (nice_name in nice_names) {
-  total_obs <- nrow(obs_list[[nice_name]][["obs"]])
-  obs_list[[nice_name]][["obs"]] <- obs_list[[nice_name]][["obs"]] %>%
-    filter(year >= 2000)
-  filtered_obs <- nrow(obs_list[[nice_name]][["obs"]])
-  message(filtered_obs, " ", nice_name, " records after filtering (",
-          total_obs, " before filtering)")
-  # Get min/max lat/lon while iterating here
-  # So ugly, JCO
-  if (is.na(min_lon)) {
-    min_lon <- min(obs_list[[nice_name]][["obs"]]$longitude)
-  } else {
-    min_lon <- min(min_lon, obs_list[[nice_name]][["obs"]]$longitude)
-  }
-  if (is.na(max_lon)) {
-    max_lon <- max(obs_list[[nice_name]][["obs"]]$longitude)
-  } else {
-    max_lon <- max(max_lon, obs_list[[nice_name]][["obs"]]$longitude)
-  }
-  if (is.na(min_lat)) {
-    min_lat <- min(obs_list[[nice_name]][["obs"]]$latitude)
-  } else {
-    min_lat <- min(min_lat, obs_list[[nice_name]][["obs"]]$latitude)
-  }
-  if (is.na(max_lat)) {
-    max_lat <- max(obs_list[[nice_name]][["obs"]]$latitude)
-  } else {
-    max_lat <- max(max_lat, obs_list[[nice_name]][["obs"]]$latitude)
-  }
-}
-
-# Another QA/QC plot, post-filtering
-all_obs <- dplyr::bind_rows(lapply(obs_list, "[[", "obs"))
-ggplot(data = all_obs, mapping = aes(x = longitude, 
-                                     y = latitude,
-                                     color = accepted_name)) +
-  geom_point(alpha = 0.7, size = 0.6, pch = 21) +
-  theme_bw() +
-  theme(legend.position = "top")
-
-
 
 # Download climate data from Swallowtail project if necessary
 # "https://github.com/Big-Biodiversity-Collaborative/SwallowtailClimateChange/blob/main/data/wc2-1/bio1.tif"
@@ -129,6 +36,86 @@ for (bio in bio_vars) {
   }
 }
 
+# Download data from GBIF for Euphydryas chalcedona
+# Download data from GBIF for two host plants
+# Diplacus aurantiacus, Scrophularia californica
+species <- c("Euphydryas chalcedona", "Diplacus aurantiacus", 
+             "Scrophularia californica")
+obs_list <- list()
+for (one_sp in species) {
+  nice_name <- tolower(x = gsub(pattern = " ",
+                                replacement = "_",
+                                x = one_sp))
+  data_file <- paste0("data/gbif/", nice_name, "-gbif-raw.csv")
+  if (!file.exists(data_file) & !re_download) {
+  download_gbif(species_name = one_sp, gbif_name = one_sp,
+                verbose = TRUE, restrict_n_amer = TRUE)
+  } else {
+    message(paste0("Data for ", one_sp, " already on disk."))
+  }
+  # host or insect?
+  sp_type <- "host"
+  if (one_sp == "Euphydryas chalcedona") {
+    sp_type <- "insect"
+  }
+  obs_list[[nice_name]][["sp_type"]] <- sp_type
+  obs_list[[nice_name]][["obs"]] <- read.csv(file = data_file)
+}
+
+# Do some filtering and QA/QC. Similar to Swallowtail project, we want to 
+#   1. Remove duplicates (data, latitude, and longitude)
+#   2. Only retain records from 2000-present
+#   3. Are in places where we have climate data
+#   4. Exclude observations outside the 95% contour
+
+# Load one tif file with climate data
+tif_file <- list.files(path = "data/climate", 
+                       pattern = ".tif$", 
+                       full.names = TRUE)[1]
+climate_data <- terra::rast(tif_file)
+
+for (nice_name in names(obs_list)) {
+  message("Before filtering, ", nrow(obs_list[[nice_name]][["obs"]]), " obs of ", nice_name)
+  # 1. Remove duplicates
+  obs_list[[nice_name]][["obs"]] <- obs_list[[nice_name]][["obs"]] %>%
+    distinct(across(c(longitude, latitude, year, month, day)), .keep_all = TRUE)
+  
+  # 2. Restrict to >= 2000
+  obs_list[[nice_name]][["obs"]] <- obs_list[[nice_name]][["obs"]] %>%
+    filter(year >= 2000)
+  
+  # 3. Are in cells with climate data
+  # Create a small data frame with coordinates we can compare with climate 
+  # raster
+  lon_lat <- obs_list[[nice_name]][["obs"]] %>%
+    dplyr::select(c(longitude, latitude))
+  # Use terra::extract to pull out climate values for those coordinates
+  climate_values <- terra::extract(x = climate_data,
+                                 y = lon_lat)[,2]
+  # See which rows have climate data
+  climate_rows <- which(!is.na(climate_values))
+  # Use that vector of row indices to keep only rows with climate data
+  obs_list[[nice_name]][["obs"]] <- obs_list[[nice_name]][["obs"]] %>%
+    slice(climate_rows)
+  
+  # 4. Calculate 95% envelope and discard obs outside
+  in_out <- envelope(data = obs_list[[nice_name]][["obs"]], 
+                     climate_data = climate_data)
+  inside_rows <- which(in_out == 1)
+  obs_list[[nice_name]][["obs"]] <- obs_list[[nice_name]][["obs"]] %>%
+    slice(inside_rows)
+  message("After filtering, ", nrow(obs_list[[nice_name]][["obs"]]), " obs of ", nice_name)
+}
+
+# For QA/QC plotting
+all_obs <- dplyr::bind_rows(lapply(obs_list, "[[", "obs"))
+ggplot(data = all_obs, mapping = aes(x = longitude, 
+                                     y = latitude,
+                                     color = accepted_name)) +
+  geom_point(alpha = 0.7, size = 0.6, pch = 21) +
+  theme_bw() +
+  theme(legend.position = "top")
+  
 # Create geographic extent of *ALL* observations
 # bio1 <- terra::rast(x = "data/climate/bio1.tif")
 # geo_ext <- terra::ext(bio1)
@@ -306,6 +293,7 @@ sdmtrain$host_sum <- rowSums(sdmtrain[, names(obs_list)[-1]])
 glm_simple_model <- stats::glm(formula = pa ~ host_sum,
                                data = sdmtrain,
                                family = binomial(link = "logit"))
+summary(glm_simple_model)
 
 lnL_simple <- as.numeric(stats::logLik(glm_simple_model))
 lnL_full <- as.numeric(stats::logLik(glm_model))
