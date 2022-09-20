@@ -115,7 +115,17 @@ ggplot(data = all_obs, mapping = aes(x = longitude,
   geom_point(alpha = 0.7, size = 0.6, pch = 21) +
   theme_bw() +
   theme(legend.position = "top")
-  
+
+# Create presence/absence data
+
+# TESTING ONLY...
+observations <- obs_list[["euphydryas_chalcedona"]][["obs"]]
+observations <- observations %>%
+  dplyr::select(longitude, latitude) %>%
+  dplyr::rename(x = longitude) %>%
+  dplyr::rename(y = latitude)
+
+
 # Create geographic extent of *ALL* observations
 # bio1 <- terra::rast(x = "data/climate/bio1.tif")
 # geo_ext <- terra::ext(bio1)
